@@ -13,3 +13,4 @@ async-h1 = "1.1.0"
 http-types = "1.1.1"
 async-listen = "0.2.0"
 libfrps-rs = { path = "../libfrps-rs" }
+enum_extract = "0.1.1"

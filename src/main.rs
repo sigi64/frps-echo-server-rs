@@ -1,6 +1,7 @@
 //extern crate async_listen;
 extern crate async_std;
 extern crate http_types;
+extern crate enum_extract;
 extern crate libfrps_rs;
 
 //use async_listen::{backpressure, error_hint, ByteStream, ListenExt};
@@ -10,7 +11,7 @@ use async_std::task;
 use async_std::io::{BufRead, Read};
 use http_types::headers::{HeaderName, HeaderValue};
 use http_types::{Body, Headers, Response, StatusCode};
-use libfrps_rs::{Serializer, Tokenizer, Value, ValueTreeBuilder};
+use libfrps_rs::{Serializer, Tokenizer, Value, ValueTreeBuilder, ParsedStatus};
 use std::io;
 use std::time::Duration;
 use std::str::FromStr;
@@ -88,6 +89,8 @@ async fn accept(addr: String, stream: TcpStream) -> http_types::Result<()> {
             }
         }
 
+        use futures::io::AsyncReadExt;
+
         let body: Body = req.into();
         let body: String = body.into_string().await?;
 
@@ -101,7 +104,10 @@ async fn accept(addr: String, stream: TcpStream) -> http_types::Result<()> {
         let mut values = ValueTreeBuilder::new();
 
         match tokenizer.parse(body.as_bytes(), &mut values) {
-            OK(finished, len) => {},
+            Ok((expect_data, processed))=> {
+
+
+            },
             Err(_) => {
                 let mut res = Response::new(StatusCode::BadRequest);
                 res.insert_header("Content-Type", "text/plain")?;
@@ -119,6 +125,51 @@ async fn accept(addr: String, stream: TcpStream) -> http_types::Result<()> {
 
     Ok(())
 }
+
+fn create_echo_response(call: &ValueTreeBuilder) -> Vec<u8> {
+    use enum_extract::let_extract;
+
+    // now try to serialize
+    let mut serializer = Serializer::new();
+    let mut buffer = vec![];
+    buffer.resize(1024, 0); // make buffer large enought
+    let mut cnt: usize = 0;
+    match &call.what {
+        ParsedStatus::Fault => {
+            assert!(
+                call.values.len() == 2,
+                "There should be Fault with 2 values"
+            );
+            let_extract!(Value::Int(code), &call.values[0], unreachable!());
+            let_extract!(Value::Str(msg), &call.values[1], unreachable!());
+            let r = serializer.write_fault(&mut buffer[cnt..], *code, msg.as_str());
+            cnt += r.unwrap();
+        }
+        ParsedStatus::MethodCall(name) => {
+            let r = serializer.write_call(&mut buffer[cnt..], name.as_str());
+            cnt += r.unwrap();
+            for i in 0..call.values.len() {
+                serializer.reset();
+                let r = serializer.write_value(&mut buffer[cnt..], &call.values[i]);
+                cnt += r.unwrap();
+            }
+        }
+        ParsedStatus::Response => {
+            assert!(call.values.len() == 1);
+            let r = serializer.write_response(&mut buffer[cnt..], &call.values[0]);
+            cnt += r.unwrap();
+        }
+        _ => return vec![],
+    }
+    if !call.data.is_empty() {
+        serializer.reset();
+        let r = serializer.write_data(&mut buffer[cnt..], &call.data);
+        cnt += r.unwrap();
+    }
+    
+    return buffer
+}
+
 
 // fn log_accept_error(e: &io::Error) {
 //     eprintln!("Error: {}. Listener paused for 0.5s. {}", e, error_hint(e));
