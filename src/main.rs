@@ -1,20 +1,18 @@
-//extern crate async_listen;
 extern crate async_std;
-extern crate http_types;
 extern crate enum_extract;
+extern crate http_types;
 extern crate libfrps_rs;
 
 //use async_listen::{backpressure, error_hint, ByteStream, ListenExt};
 use async_std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use async_std::prelude::*;
 use async_std::task;
-use async_std::io::{BufRead, Read};
 use http_types::headers::{HeaderName, HeaderValue};
 use http_types::{Body, Headers, Response, StatusCode};
-use libfrps_rs::{Serializer, Tokenizer, Value, ValueTreeBuilder, ParsedStatus};
+use libfrps_rs::{ParsedStatus, Serializer, Tokenizer, Value, ValueTreeBuilder};
 use std::io;
-use std::time::Duration;
 use std::str::FromStr;
+use std::time::Duration;
 
 #[async_std::main]
 async fn main() -> http_types::Result<()> {
@@ -45,12 +43,11 @@ async fn main() -> http_types::Result<()> {
 async fn accept(addr: String, stream: TcpStream) -> http_types::Result<()> {
     println!("starting new connection from {}", stream.peer_addr()?);
     async_h1::accept(&addr, stream.clone(), |req| async move {
-
         let content_length = HeaderName::from_str("content-length").unwrap();
         let content_type = HeaderName::from_str("content-type").unwrap();
         let accept = HeaderName::from_str("accept").unwrap();
         let user_agent = HeaderName::from_str("user-agent").unwrap();
-        
+
         if let Some(val) = req.header(&user_agent) {
             println!("User-agent: {}", val[0])
         }
@@ -69,7 +66,7 @@ async fn accept(addr: String, stream: TcpStream) -> http_types::Result<()> {
                     res.insert_header("Content-Type", "text/plain")?;
                     res.set_body("Invalid content-type expected: either application/x-frpc or application/x-frps");
                     return Ok(res)
-                } 
+                }
             }
         }
 
@@ -89,10 +86,12 @@ async fn accept(addr: String, stream: TcpStream) -> http_types::Result<()> {
             }
         }
 
-        use futures::io::AsyncReadExt;
-
         let body: Body = req.into();
-        let body: String = body.into_string().await?;
+        let mut reader = body.into_reader();
+        // let mut data = reader.bytes();
+        // while let Some(byte) = data.next().await {
+        //     println!("Data:{}", byte?);
+        // }
 
         // parse
         let mut tokenizer = if is_frps {
@@ -101,25 +100,52 @@ async fn accept(addr: String, stream: TcpStream) -> http_types::Result<()> {
             Tokenizer::new_frpc()
         };
 
-        let mut values = ValueTreeBuilder::new();
+        let mut call = ValueTreeBuilder::new();
 
-        match tokenizer.parse(body.as_bytes(), &mut values) {
-            Ok((expect_data, processed))=> {
+        let mut data_after_end = false;
+        let mut need_data = true;
+        let mut b: [u8; 1024] = [0; 1024];
+        while let Ok(len) = reader.read(&mut b).await {
+            if len == 0 {
+                break;
+            }
+            println!("Body chunk:{}", len);
 
-
-            },
-            Err(_) => {
-                let mut res = Response::new(StatusCode::BadRequest);
-                res.insert_header("Content-Type", "text/plain")?;
-                res.set_body("Invalid body, can't deserialize");
-                return Ok(res)
+            match tokenizer.parse(&b[..len], &mut call) {
+                Ok((expecting_data, processed)) => {
+                    need_data = expecting_data;
+                    if !expecting_data {
+                        data_after_end = processed < 1;
+                        if data_after_end {
+                            break;
+                        }
+                    }
+                },
+                Err(_) => {
+                    let mut res = Response::new(StatusCode::BadRequest);
+                    res.insert_header("Content-Type", "text/plain")?;
+                    res.set_body("Invalid body, can't deserialize");
+                    return Ok(res)
+                }
             }
         }
 
-        let mut res = Response::new(StatusCode::Ok);
-        res.insert_header("Content-Type", "text/plain")?;
-        res.set_body("Hello");
-        Ok(res)
+        let mut response = Response::new(StatusCode::Ok);
+        response.insert_header("Content-Type", "text/plain")?;
+    
+        let body = if need_data {
+            String::from("error(unexpected data end)")
+        } else if data_after_end {
+            String::from("error(data after end)")
+        } else {
+            // ok response
+            format!("{}", call)
+        };
+    
+        println!("{}", call);
+
+        response.set_body(body);
+        Ok(response)
     })
     .await?;
 
@@ -129,9 +155,9 @@ async fn accept(addr: String, stream: TcpStream) -> http_types::Result<()> {
 fn create_echo_response(call: &ValueTreeBuilder) -> Vec<u8> {
     use enum_extract::let_extract;
 
-    // now try to serialize
     let mut serializer = Serializer::new();
     let mut buffer = vec![];
+    // now try to serialize
     buffer.resize(1024, 0); // make buffer large enought
     let mut cnt: usize = 0;
     match &call.what {
@@ -166,10 +192,9 @@ fn create_echo_response(call: &ValueTreeBuilder) -> Vec<u8> {
         let r = serializer.write_data(&mut buffer[cnt..], &call.data);
         cnt += r.unwrap();
     }
-    
-    return buffer
-}
 
+    return buffer;
+}
 
 // fn log_accept_error(e: &io::Error) {
 //     eprintln!("Error: {}. Listener paused for 0.5s. {}", e, error_hint(e));
