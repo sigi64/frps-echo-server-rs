@@ -1,16 +1,10 @@
-extern crate async_std;
-extern crate enum_extract;
-extern crate http_types;
-extern crate libfrps_rs;
-
 //use async_listen::{backpressure, error_hint, ByteStream, ListenExt};
-use async_std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use async_std::prelude::*;
+use async_std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use async_std::task;
 use http_types::headers::{HeaderName, HeaderValue};
 use http_types::{Body, Headers, Response, StatusCode};
 use libfrps_rs::{ParsedStatus, Serializer, Tokenizer, Value, ValueTreeBuilder};
-use std::io;
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -101,9 +95,10 @@ async fn accept(addr: String, stream: TcpStream) -> http_types::Result<()> {
         };
 
         let mut call = ValueTreeBuilder::new();
-
+        // keep state of processing incoming data
         let mut data_after_end = false;
-        let mut need_data = true;
+        let mut need_data = true; // we are greedy for data
+
         let mut b: [u8; 1024] = [0; 1024];
         while let Ok(len) = reader.read(&mut b).await {
             if len == 0 {
@@ -115,6 +110,7 @@ async fn accept(addr: String, stream: TcpStream) -> http_types::Result<()> {
                 Ok((expecting_data, processed)) => {
                     need_data = expecting_data;
                     if !expecting_data {
+                        // propagate if tokenizer parsed all data
                         data_after_end = processed < 1;
                         if data_after_end {
                             break;
@@ -131,6 +127,7 @@ async fn accept(addr: String, stream: TcpStream) -> http_types::Result<()> {
         }
 
         let mut response = Response::new(StatusCode::Ok);
+        response.insert_header("User-Agent", "frps-echo-server-rs");
         response.insert_header("Content-Type", "text/plain")?;
     
         let body = if need_data {
